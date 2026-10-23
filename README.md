@@ -37,10 +37,11 @@ Para ver a expiração acontecendo rápido: `RESERVATION_TTL=PT10S EXPIRATION_IN
 
 | Suite | O que prova |
 |---|---|
-| `ConcurrencyTest` | 400 requisições simultâneas em 50 assentos → exatamente 50 reservas; quantidades mistas nunca excedem a capacidade; 30 retries simultâneos com a mesma chave → 1 reserva; cancelamentos concorrentes devolvem assentos uma única vez; 6 sweepers concorrentes (simulando várias instâncias) expiram cada reserva exatamente uma vez; confirm × sweeper no deadline. |
+| `ConcurrencyTest` | 400 requisições simultâneas em 50 assentos → exatamente 50 reservas; quantidades mistas nunca excedem a capacidade; 30 retries simultâneos com a mesma chave → 1 reserva; cancelamentos concorrentes devolvem assentos uma única vez; 6 sweepers concorrentes (simulando várias instâncias) expiram cada reserva exatamente uma vez; sweeper pula (sem esperar) linha travada por confirm/cancel em andamento; confirm bloqueado atrás de um sweeper que está commitando vê `EXPIRED`. |
 | `ReservationApiTest` | Fluxo completo, idempotência, reuso de chave com payload diferente, limites, estados inválidos, 404s. |
 | `ReservationExpirationTest` | Sweeper, TTL, status efetivo antes do sweep, confirmadas nunca expiram. Usa `Clock` controlável — nenhum `sleep`. |
-| `EventApiTest` | Criação, disponibilidade, validação, erros RFC 9457. |
+| `EventApiTest` | Criação, disponibilidade, validação, erros RFC 9457, replay após o início do evento, precisão de `startsAt`. |
+| `AvailabilityCacheTest` | Cache ligado: leitura servida do cache, invalidação por escrita local. |
 
 Os testes são de integração via HTTP contra o app real + Postgres real: o que se quer provar
 (locks, isolamento, `ON CONFLICT`, `SKIP LOCKED`) não existe em mocks ou H2.
@@ -80,6 +81,7 @@ Ciclo de vida da reserva:
 Códigos de erro: `VALIDATION_ERROR`, `INVALID_REQUEST`, `MALFORMED_REQUEST`, `INVALID_PARAMETER`,
 `EVENT_NOT_FOUND`, `RESERVATION_NOT_FOUND`, `INSUFFICIENT_TICKETS` (inclui `requested`/`available`),
 `EVENT_ALREADY_STARTED`, `RESERVATION_EXPIRED`, `INVALID_RESERVATION_STATE`, `IDEMPOTENCY_KEY_REUSED`, `INTERNAL_ERROR`.
+Demais erros 4xx do framework mantêm o status e usam o nome dele como `code` (ex.: `406` → `NOT_ACCEPTABLE`).
 
 ## Decisões arquiteturais
 
@@ -156,9 +158,11 @@ devolução (intervalo do sweep) é aceitável para estoque.
 
 `GET /events/{id}` é o endpoint mais martelado num flash sale. Cada instância mantém um cache local
 (Caffeine) com TTL de 1s + `Cache-Control: max-age=1`: N requisições/s viram ~1 query por evento por
-segundo por instância. O valor pode estar até 1s defasado — **e isso nunca afeta a correção**, porque a
+segundo por instância — misses simultâneos da mesma chave compartilham uma única query (sem *stampede*
+quando a entrada expira). O valor pode estar até 1s defasado — **e isso nunca afeta a correção**, porque a
 decisão de reservar é sempre tomada contra a linha do banco. Escritas locais invalidam o cache da
-instância (read-your-writes no mesmo nó).
+instância (read-your-writes no mesmo nó); a invalidação espera um carregamento em andamento da mesma
+chave, então um valor lido antes da escrita nunca fica no cache depois dela.
 
 Sem Redis de propósito: cache local não tem invalidação distribuída a coordenar e o TTL curto já
 limita a defasagem.
@@ -178,11 +182,13 @@ limita a defasagem.
   atrapalharia o review.
 - **`TransactionTemplate` explícito em vez de `@Transactional`**: fronteiras de transação visíveis no código,
   sem armadilhas de proxy/self-invocation.
-- **`Clock` injetado** (resolução de microssegundos = a do `TIMESTAMPTZ`): testes de expiração determinísticos
-  e a resposta de um replay idêntica à original.
+- **`Clock` injetado** (resolução de microssegundos = a do `TIMESTAMPTZ`; `startsAt` também é truncado):
+  testes de expiração determinísticos e a resposta de um replay idêntica à original.
 - **Flyway**: migrações seguras com várias instâncias subindo juntas (lock no banco).
-- **nginx `proxy_next_upstream error timeout`**: o LB não reenvia sozinho um POST que já pode ter sido
-  processado; retry é responsabilidade do cliente, com a mesma `Idempotency-Key`.
+- **nginx**: por padrão o LB nunca reenvia a outro nó um POST que já chegou a um upstream (exigiria
+  `non_idempotent`); retry é responsabilidade do cliente, com a mesma `Idempotency-Key`. Conexões com
+  as instâncias são reaproveitadas (`keepalive`), sem um handshake TCP por requisição.
+- **Sem senha padrão**: `DB_PASSWORD` é obrigatória fora do compose/testes.
 
 ### Um bug achado no caminho
 
