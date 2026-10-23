@@ -1,14 +1,19 @@
 package br.com.ticketbrasil.reservation
 
+import br.com.ticketbrasil.event.EventRepository
 import br.com.ticketbrasil.support.ApiResponse
 import br.com.ticketbrasil.support.IntegrationTest
 import org.junit.jupiter.api.Test
 import org.springframework.beans.factory.annotation.Autowired
+import org.springframework.transaction.support.TransactionTemplate
 import java.time.Duration
 import java.util.UUID
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 
 /**
  * Hammers the API from many threads at once. Every request goes through its own HTTP
@@ -19,6 +24,15 @@ class ConcurrencyTest : IntegrationTest() {
 
     @Autowired
     private lateinit var expirer: ReservationExpirer
+
+    @Autowired
+    private lateinit var reservations: ReservationRepository
+
+    @Autowired
+    private lateinit var events: EventRepository
+
+    @Autowired
+    private lateinit var tx: TransactionTemplate
 
     private fun <T> concurrently(times: Int, action: (Int) -> T): List<T> {
         val pool = Executors.newFixedThreadPool(64)
@@ -100,11 +114,10 @@ class ConcurrencyTest : IntegrationTest() {
     }
 
     @Test
-    fun `confirm racing the sweeper ends in exactly one consistent outcome`() {
+    fun `confirm exactly at the deadline loses to the sweeper`() {
         val eventId = createEvent(capacity = 50)
         val ids = (0 until 50).map { reserve(eventId, customerId = "c-$it").json["id"].asString() }
 
-        // Exactly at the deadline: confirm must lose (hold elapsed), sweeper must win.
         clock.advance(Duration.ofMinutes(10))
         val results = concurrently(ids.size + 2) { i ->
             if (i < ids.size) api.post("/reservations/${ids[i]}/confirm").status else expirer.expireElapsedHolds()
@@ -112,5 +125,68 @@ class ConcurrencyTest : IntegrationTest() {
 
         assertEquals(setOf(409), results.take(ids.size).toSet())
         assertEquals(50, availableOf(eventId))
+    }
+
+    @Test
+    fun `sweeper skips a hold locked by an in-flight transition instead of waiting`() {
+        val eventId = createEvent(capacity = 10)
+        val id = UUID.fromString(reserve(eventId, quantity = 4).json["id"].asString())
+        clock.advance(Duration.ofMinutes(11))
+
+        // Holds the row lock exactly like a confirm/cancel that has not committed yet.
+        val locked = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val holder = Executors.newSingleThreadExecutor().submit {
+            tx.execute {
+                reservations.findByIdForUpdate(id)
+                locked.countDown()
+                release.await()
+            }
+        }
+        locked.await()
+
+        val sweep = Executors.newSingleThreadExecutor().submit<Int> { expirer.expireElapsedHolds() }
+        assertEquals(0, sweep.get(5, TimeUnit.SECONDS), "sweeper must skip the locked row, not block on it")
+        assertEquals(6, availableOf(eventId))
+
+        release.countDown()
+        holder.get(5, TimeUnit.SECONDS)
+        assertEquals(1, expirer.expireElapsedHolds(), "the next sweep picks the hold up once unlocked")
+        assertEquals(10, availableOf(eventId))
+    }
+
+    @Test
+    fun `confirm blocked behind a committing sweeper sees the hold as expired`() {
+        val eventId = createEvent(capacity = 10)
+        val id = UUID.fromString(reserve(eventId, quantity = 4).json["id"].asString())
+
+        // Another instance whose clock already passed the deadline is mid-sweep: rows locked,
+        // marked EXPIRED, seats returned, transaction not committed yet. This instance's clock
+        // still says PENDING, so only the row lock can make the confirm see the right state.
+        val sweeperNow = clock.instant().plus(Duration.ofMinutes(11))
+        val swept = CountDownLatch(1)
+        val commit = CountDownLatch(1)
+        val sweeper = Executors.newSingleThreadExecutor().submit {
+            tx.execute {
+                val elapsed = reservations.lockElapsedHolds(sweeperNow, 10)
+                reservations.markExpired(elapsed.map { it.id }, sweeperNow)
+                events.increment(eventId, elapsed.sumOf { it.quantity })
+                swept.countDown()
+                commit.await()
+            }
+        }
+        swept.await()
+
+        val confirm = Executors.newSingleThreadExecutor().submit<ApiResponse> { api.post("/reservations/$id/confirm") }
+        assertFailsWith<TimeoutException>("confirm must wait for the sweeper's row lock") {
+            confirm.get(300, TimeUnit.MILLISECONDS)
+        }
+
+        commit.countDown()
+        sweeper.get(5, TimeUnit.SECONDS)
+        val response = confirm.get(5, TimeUnit.SECONDS)
+        assertEquals(409, response.status)
+        assertEquals("RESERVATION_EXPIRED", response.json["code"].asString())
+        assertEquals(10, availableOf(eventId))
     }
 }
