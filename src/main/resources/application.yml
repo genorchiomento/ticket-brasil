@@ -4,7 +4,7 @@ spring:
   datasource:
     url: ${DB_URL:jdbc:postgresql://localhost:5432/ticketbrasil}
     username: ${DB_USER:ticket}
-    password: ${DB_PASSWORD:ticket}
+    password: ${DB_PASSWORD}
     hikari:
       maximum-pool-size: ${DB_POOL_SIZE:20}
 
