@@ -1,0 +1,32 @@
+spring:
+  application:
+    name: ticket-brasil
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/ticketbrasil}
+    username: ${DB_USER:ticket}
+    password: ${DB_PASSWORD:ticket}
+    hikari:
+      maximum-pool-size: ${DB_POOL_SIZE:20}
+
+server:
+  port: ${PORT:8080}
+  shutdown: graceful
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      probes:
+        enabled: true
+
+ticket:
+  reservation-ttl: ${RESERVATION_TTL:PT10M}
+  max-tickets-per-reservation: 10
+  availability-cache-ttl: ${AVAILABILITY_CACHE_TTL:PT1S}
+  expiration:
+    enabled: true
+    interval: ${EXPIRATION_INTERVAL:PT5S}
+    batch-size: 500
