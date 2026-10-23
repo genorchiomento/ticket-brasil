@@ -12,6 +12,7 @@ import org.springframework.stereotype.Service
 import org.springframework.transaction.support.TransactionTemplate
 import java.time.Clock
 import java.time.Instant
+import java.time.temporal.ChronoUnit
 import java.util.UUID
 
 data class CreateEventCommand(val name: String, val startsAt: Instant, val capacity: Int)
@@ -35,18 +36,22 @@ class EventService(
         .build()
 
     fun create(command: CreateEventCommand, idempotencyKey: String?): IdempotentResult<Event> {
+        // Stored at TIMESTAMPTZ (microsecond) precision so the first response and any replay are identical.
+        val startsAt = command.startsAt.truncatedTo(ChronoUnit.MICROS)
+        val fingerprint = idempotencyKey?.let { Idempotency.fingerprint(command.name, startsAt, command.capacity) }
+
+        // A replay must return the original event even after its start date has passed.
+        if (idempotencyKey != null) replayOf(idempotencyKey, fingerprint)?.let { return it }
+
         val now = clock.instant()
         if (command.name.isBlank()) throw InvalidRequestException("name must not be blank")
         if (command.capacity <= 0) throw InvalidRequestException("capacity must be positive")
-        if (!command.startsAt.isAfter(now)) throw InvalidRequestException("startsAt must be in the future")
+        if (!startsAt.isAfter(now)) throw InvalidRequestException("startsAt must be in the future")
 
-        val fingerprint = idempotencyKey?.let {
-            Idempotency.fingerprint(command.name, command.startsAt, command.capacity)
-        }
         val event = Event(
             id = UUID.randomUUID(),
             name = command.name.trim(),
-            startsAt = command.startsAt,
+            startsAt = startsAt,
             capacity = command.capacity,
             available = command.capacity,
             createdAt = now,
@@ -56,17 +61,27 @@ class EventService(
             if (events.insertIfAbsent(event, idempotencyKey, fingerprint)) {
                 IdempotentResult(event, replayed = false)
             } else {
-                val existing = events.findByIdempotencyKey(idempotencyKey!!)
+                // A concurrent request with the same key committed between the lookup and the insert.
+                replayOf(idempotencyKey!!, fingerprint)
                     ?: error("Idempotency key conflict reported but no row found for '$idempotencyKey'")
-                if (existing.fingerprint != fingerprint) throw IdempotencyKeyReusedException(idempotencyKey)
-                IdempotentResult(existing.value, replayed = true)
             }
         }!!
     }
 
+    private fun replayOf(idempotencyKey: String, fingerprint: String?): IdempotentResult<Event>? {
+        val existing = events.findByIdempotencyKey(idempotencyKey) ?: return null
+        if (existing.fingerprint != fingerprint) throw IdempotencyKeyReusedException(idempotencyKey)
+        return IdempotentResult(existing.value, replayed = true)
+    }
+
+    /**
+     * Loads through the cache so concurrent misses for the same event share one query
+     * instead of stampeding the database when an entry expires. Because [evictAvailability]
+     * waits for an in-flight load of the same key, a value read before a local write can
+     * never be cached after it.
+     */
     fun getAvailability(id: UUID): Event =
-        availabilityCache.getIfPresent(id)
-            ?: (events.findById(id) ?: throw EventNotFoundException(id)).also { availabilityCache.put(id, it) }
+        availabilityCache.get(id) { events.findById(it) ?: throw EventNotFoundException(it) }
 
     /** Drops the local snapshot so this instance reads its own writes immediately. */
     fun evictAvailability(id: UUID) = availabilityCache.invalidate(id)

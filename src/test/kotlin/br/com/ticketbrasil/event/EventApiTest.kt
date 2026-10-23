@@ -3,6 +3,7 @@ package br.com.ticketbrasil.event
 import br.com.ticketbrasil.support.IntegrationTest
 import org.junit.jupiter.api.Test
 import java.time.Duration
+import java.time.temporal.ChronoUnit
 import java.util.UUID
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
@@ -85,5 +86,34 @@ class EventApiTest : IntegrationTest() {
         val response = api.get("/events/not-a-uuid")
         assertEquals(400, response.status)
         assertEquals("INVALID_PARAMETER", response.json["code"].asString())
+    }
+
+    @Test
+    fun `replay returns the original event even after it started`() {
+        val headers = mapOf("Idempotency-Key" to "evt-3")
+        val request = body(startsIn = Duration.ofHours(1))
+        val first = api.post("/events", request, headers)
+
+        clock.advance(Duration.ofHours(2))
+        val replay = api.post("/events", request, headers)
+
+        assertEquals(201, replay.status)
+        assertEquals("true", replay.header("Idempotent-Replayed"))
+        assertEquals(first.body, replay.body)
+    }
+
+    @Test
+    fun `sub-microsecond startsAt is stored and echoed at database precision`() {
+        val startsAt = clock.instant().plus(Duration.ofDays(1)).plusNanos(123_456_789)
+        val request = mapOf("name" to "Show", "startsAt" to startsAt.toString(), "capacity" to 10)
+        val headers = mapOf("Idempotency-Key" to "evt-4")
+
+        val created = api.post("/events", request, headers)
+        val replay = api.post("/events", request, headers)
+        val fetched = api.get("/events/${created.json["id"].asString()}")
+
+        assertEquals(startsAt.truncatedTo(ChronoUnit.MICROS).toString(), created.json["startsAt"].asString())
+        assertEquals(created.body, replay.body)
+        assertEquals(created.json["startsAt"], fetched.json["startsAt"])
     }
 }
