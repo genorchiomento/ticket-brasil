@@ -18,7 +18,8 @@ data class ApiResponse(val status: Int, val body: String, val headers: Map<Strin
 class ApiClient(private val baseUrl: String, private val mapper: JsonMapper) {
     private val http = HttpClient.newBuilder().version(HttpClient.Version.HTTP_1_1).build()
 
-    fun get(path: String) = send(HttpRequest.newBuilder(uri(path)).GET())
+    fun get(path: String, headers: Map<String, String> = emptyMap()) =
+        send(HttpRequest.newBuilder(uri(path)).GET().apply { headers.forEach { (k, v) -> header(k, v) } })
 
     fun delete(path: String) = send(HttpRequest.newBuilder(uri(path)).DELETE())
 

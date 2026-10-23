@@ -116,4 +116,11 @@ class EventApiTest : IntegrationTest() {
         assertEquals(created.body, replay.body)
         assertEquals(created.json["startsAt"], fetched.json["startsAt"])
     }
+
+    @Test
+    fun `framework client errors keep their status instead of becoming 500`() {
+        val id = api.post("/events", body()).json["id"].asString()
+        val response = api.get("/events/$id", headers = mapOf("Accept" to "text/csv"))
+        assertEquals(406, response.status)
+    }
 }

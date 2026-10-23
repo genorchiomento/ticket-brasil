@@ -6,6 +6,7 @@ import org.springframework.http.HttpStatus
 import org.springframework.http.MediaType
 import org.springframework.http.ResponseEntity
 import org.springframework.http.converter.HttpMessageNotReadableException
+import org.springframework.web.ErrorResponse
 import org.springframework.web.HttpMediaTypeNotSupportedException
 import org.springframework.web.HttpRequestMethodNotSupportedException
 import org.springframework.web.bind.MethodArgumentNotValidException
@@ -90,6 +91,15 @@ class ApiExceptionHandler {
 
     @ExceptionHandler(Exception::class)
     fun handleUnexpected(e: Exception): ResponseEntity<ApiError> {
+        // Any other Spring MVC failure (406, 400 on a missing parameter, 503 on an async
+        // timeout, ...) already knows its status: keep it instead of reporting a 500.
+        if (e is ErrorResponse) {
+            val status = HttpStatus.resolve(e.statusCode.value())
+            if (status != null && !status.is5xxServerError) {
+                log.debug("Client error {}: {}", status.value(), e.message)
+                return respond(error(status, status.name, e.body.detail))
+            }
+        }
         log.error("Unhandled error", e)
         return respond(error(HttpStatus.INTERNAL_SERVER_ERROR, "INTERNAL_ERROR", "Unexpected error"))
     }
