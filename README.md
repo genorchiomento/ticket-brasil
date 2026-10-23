@@ -10,7 +10,7 @@
 ![PostgreSQL](https://img.shields.io/badge/PostgreSQL-17-4169E1?logo=postgresql&logoColor=white)
 ![Docker](https://img.shields.io/badge/Docker-compose-2496ED?logo=docker&logoColor=white)
 
-[Quick start](#quick-start) · [API](#api) · [Configuração](#configuração) · [Arquitetura](docs/ARCHITECTURE.md) · [Débitos técnicos](#débitos-técnicos) · [Evoluções](#evoluções-futuras)
+[Quick start](#quick-start) · [API](#api) · [Configuração](#configuração) · [Arquitetura](docs/ARCHITECTURE.md) · [Trade-offs](#decisões-e-trade-offs) · [Débitos técnicos](#débitos-técnicos) · [Evoluções](#evoluções-futuras)
 
 </div>
 
@@ -182,6 +182,21 @@ src/main/kotlin/br/com/ticketbrasil/
 src/main/resources/db/migration/   Migrações Flyway
 docker/ · scripts/ · docs/         nginx, teste de carga, arquitetura
 ```
+
+## Decisões e trade-offs
+
+Resumo das escolhas principais. O raciocínio completo e as alternativas descartadas estão em
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+| Decisão | O que ganhamos | O que custa |
+|---|---|---|
+| **Estoque decrementado por `UPDATE` condicional no PostgreSQL**, em vez de Redis ou lock distribuído | Correção garantida pelo banco, numa única instrução e sem peças extras para falhar | Linha quente: as reservas de um mesmo evento disputam o lock da mesma linha (estimativa de centenas a milhares por segundo, por evento) |
+| **Idempotência por constraint `UNIQUE`** na própria tabela de reservas | Duplicata impossível, mesmo entre instâncias e após restart | Chaves acumulam sem expirar; uma tentativa que falhou por falta de estoque não "queima" a chave (escolha deliberada) |
+| **Sweeper por polling com `SKIP LOCKED`**, em vez de fila com atraso | Sem infraestrutura extra e sem eleição de líder; todas as instâncias ajudam | Os assentos voltam com até um intervalo de atraso (5s); a leitura já mostra `EXPIRED` no prazo exato |
+| **Cache local de 1s** na disponibilidade, em vez de Redis | Nada de invalidação distribuída; uma query por evento por segundo por instância | Leitura até 1s defasada entre instâncias, sem afetar a correção da reserva |
+| **JDBC explícito** (`JdbcClient`), em vez de JPA | A semântica exata do SQL fica visível e revisável | Mapeamento de linhas escrito à mão |
+| **Prazo de expiração vindo do relógio da aplicação** | Testes determinísticos com `Clock` controlável | Exige relógios sincronizados (NTP) entre as instâncias |
+| **Sem rejeição antecipada** de evento esgotado | Um replay idempotente legítimo nunca é negado por engano | Cada tentativa num evento esgotado ainda custa uma ida ao banco |
 
 ## Débitos técnicos
 
