@@ -203,7 +203,6 @@ descubra em produção.
 | **Teste de carga é manual** (`scripts/flash-sale.sh`), fora do CI | Baixo | Rodar o script num job do CI com o compose (ou migrar para k6) |
 | **`ReservationExpirationScheduler` sem teste** do wrapper que engole erros | Baixo | Teste garantindo que uma falha do banco não interrompe o agendamento |
 | **Ambiente de dev**: credenciais `ticket/ticket` no compose, Postgres exposto no host e header `X-Upstream` revelando IPs internos | Baixo (só local) | Usar `.env` fora do git e remover o header fora do ambiente de demo |
-| **Actions do CI fixadas por tag** (`@v4`), não por SHA | Baixo | Fixar por SHA, com Dependabot atualizando |
 
 ## Evoluções futuras
 

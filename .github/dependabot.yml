@@ -1,0 +1,13 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      github-actions:
+        patterns: ["*"]
+    ignore:
+      # v6 bundles a proprietary caching component under Gradle's Terms of Use.
+      - dependency-name: gradle/actions
+        update-types: ["version-update:semver-major"]
